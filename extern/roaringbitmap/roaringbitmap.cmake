@@ -31,6 +31,12 @@ if (NOT roaringbitmap_POPULATED)
     FetchContent_Populate (roaringbitmap)
     add_subdirectory (${roaringbitmap_SOURCE_DIR} ${roaringbitmap_BINARY_DIR} EXCLUDE_FROM_ALL)
     target_compile_options (roaring PRIVATE -Wno-unused-function)
+    # CRoaring 3.0.1 trips a false-positive -Wstringop-overflow in
+    # run_container_offset() on GCC 12+, and CRoaring builds with -Werror.
+    if (CMAKE_C_COMPILER_ID STREQUAL "GNU" AND
+        CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
+        target_compile_options (roaring PRIVATE -Wno-stringop-overflow)
+    endif ()
 endif ()
 
 if (NOT TARGET vsag_roaring_headers)
