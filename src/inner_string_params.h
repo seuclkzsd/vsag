@@ -174,6 +174,10 @@ const char* const IVF_PARTITION_STRATEGY_TYPE_NEAREST = "ivf";
 const char* const IVF_PARTITION_STRATEGY_TYPE_GNO_IMI = "gno_imi";
 const char* const IVF_ROUTE_MAX_DEGREE_KEY = "route_max_degree";
 const char* const IVF_ROUTE_EF_CONSTRUCTION_KEY = "route_ef_construction";
+const char* const IVF_ENABLE_GPU_BUILD_KEY = "enable_gpu_build";
+const char* const IVF_GPU_DEVICE_ID_KEY = "gpu_device_id";
+const char* const IVF_GPU_MEMORY_BUDGET_KEY = "gpu_memory_budget";
+const char* const IVF_GPU_MIN_WORK_THRESHOLD_KEY = "gpu_min_work_threshold";
 
 const char* const GNO_IMI_FIRST_ORDER_BUCKETS_COUNT_KEY = "first_order_buckets_count";
 const char* const GNO_IMI_SECOND_ORDER_BUCKETS_COUNT_KEY = "second_order_buckets_count";
@@ -297,6 +301,10 @@ const std::unordered_map<std::string, std::string> DEFAULT_MAP = {
     {"IVF_PARTITION_STRATEGY_TYPE_NEAREST", IVF_PARTITION_STRATEGY_TYPE_NEAREST},
     {"IVF_ROUTE_MAX_DEGREE_KEY", IVF_ROUTE_MAX_DEGREE_KEY},
     {"IVF_ROUTE_EF_CONSTRUCTION_KEY", IVF_ROUTE_EF_CONSTRUCTION_KEY},
+    {"IVF_ENABLE_GPU_BUILD_KEY", IVF_ENABLE_GPU_BUILD_KEY},
+    {"IVF_GPU_DEVICE_ID_KEY", IVF_GPU_DEVICE_ID_KEY},
+    {"IVF_GPU_MEMORY_BUDGET_KEY", IVF_GPU_MEMORY_BUDGET_KEY},
+    {"IVF_GPU_MIN_WORK_THRESHOLD_KEY", IVF_GPU_MIN_WORK_THRESHOLD_KEY},
     {"IVF_TRAIN_TYPE_KMEANS", IVF_TRAIN_TYPE_KMEANS},
     {"BUILD_THREAD_COUNT_KEY", BUILD_THREAD_COUNT_KEY},
     {"LABEL_REMAP_TYPE_KEY", LABEL_REMAP_TYPE_KEY},

@@ -50,6 +50,24 @@ IVFPartitionStrategyParameters::FromJson(const JsonType& json) {
             static_cast<int32_t>(json[IVF_ROUTE_EF_CONSTRUCTION_KEY].GetInt());
         CHECK_ARGUMENT(this->route_ef_construction > 0, "route_ef_construction must be positive");
     }
+    if (json.Contains(IVF_ENABLE_GPU_BUILD_KEY)) {
+        this->enable_gpu_build = json[IVF_ENABLE_GPU_BUILD_KEY].GetBool();
+    }
+    if (json.Contains(IVF_GPU_DEVICE_ID_KEY)) {
+        this->gpu_device_id = static_cast<int32_t>(json[IVF_GPU_DEVICE_ID_KEY].GetInt());
+        CHECK_ARGUMENT(this->gpu_device_id >= 0, "gpu_device_id must not be negative");
+    }
+    if (json.Contains(IVF_GPU_MEMORY_BUDGET_KEY)) {
+        const auto budget = json[IVF_GPU_MEMORY_BUDGET_KEY].GetInt();
+        CHECK_ARGUMENT(budget >= 0, "gpu_memory_budget must not be negative");
+        this->gpu_memory_budget = static_cast<uint64_t>(budget);
+    }
+    if (json.Contains(IVF_GPU_MIN_WORK_THRESHOLD_KEY)) {
+        const auto threshold = json[IVF_GPU_MIN_WORK_THRESHOLD_KEY].GetInt();
+        CHECK_ARGUMENT(threshold >= 0, "gpu_min_work_threshold must not be negative");
+        this->gpu_min_work_threshold = static_cast<uint64_t>(threshold);
+    }
+
     CHECK_ARGUMENT(this->route_max_degree >= 4, "route_max_degree must be at least 4");
     CHECK_ARGUMENT(this->route_ef_construction >= this->route_max_degree,
                    "route_ef_construction must be no less than route_max_degree");
@@ -81,6 +99,11 @@ IVFPartitionStrategyParameters::ToJson() const {
     }
     json[IVF_ROUTE_MAX_DEGREE_KEY].SetInt(this->route_max_degree);
     json[IVF_ROUTE_EF_CONSTRUCTION_KEY].SetInt(this->route_ef_construction);
+    json[IVF_ENABLE_GPU_BUILD_KEY].SetBool(this->enable_gpu_build);
+    json[IVF_GPU_DEVICE_ID_KEY].SetInt(this->gpu_device_id);
+    json[IVF_GPU_MEMORY_BUDGET_KEY].SetInt(static_cast<int64_t>(this->gpu_memory_budget));
+    json[IVF_GPU_MIN_WORK_THRESHOLD_KEY].SetInt(
+        static_cast<int64_t>(this->gpu_min_work_threshold));
     if (this->partition_strategy_type == IVFPartitionStrategyType::GNO_IMI) {
         json[IVF_PARTITION_STRATEGY_TYPE_GNO_IMI].SetJson(this->gnoimi_param->ToJson());
     }

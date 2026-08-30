@@ -63,7 +63,13 @@ IVFNearestPartition::Train(const DatasetPtr dataset) {
     if (ivf_partition_strategy_param_->partition_train_type ==
         IVFNearestPartitionTrainerType::KMeansTrainer) {
         constexpr int32_t kmeans_iter_count = 25;
-        KMeansCluster cls(static_cast<int32_t>(dim), this->allocator_, this->thread_pool_);
+        KMeansGpuConfig gpu_config;
+        gpu_config.enabled = ivf_partition_strategy_param_->enable_gpu_build;
+        gpu_config.device_id = ivf_partition_strategy_param_->gpu_device_id;
+        gpu_config.memory_budget = ivf_partition_strategy_param_->gpu_memory_budget;
+        gpu_config.min_work_threshold = ivf_partition_strategy_param_->gpu_min_work_threshold;
+        KMeansCluster cls(
+            static_cast<int32_t>(dim), this->allocator_, this->thread_pool_, gpu_config);
         cls.Run(this->bucket_count_,
                 dataset->GetFloat32Vectors(),
                 dataset->GetNumElements(),

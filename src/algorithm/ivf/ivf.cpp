@@ -217,6 +217,34 @@ IVF::CheckAndMappingExternalParam(const JsonType& external_param,
             },
         },
         {
+            IVF_ENABLE_GPU_BUILD,
+            {
+                IVF_PARTITION_STRATEGY_PARAMS_KEY,
+                IVF_ENABLE_GPU_BUILD_KEY,
+            },
+        },
+        {
+            IVF_GPU_DEVICE_ID,
+            {
+                IVF_PARTITION_STRATEGY_PARAMS_KEY,
+                IVF_GPU_DEVICE_ID_KEY,
+            },
+        },
+        {
+            IVF_GPU_MEMORY_BUDGET,
+            {
+                IVF_PARTITION_STRATEGY_PARAMS_KEY,
+                IVF_GPU_MEMORY_BUDGET_KEY,
+            },
+        },
+        {
+            IVF_GPU_MIN_WORK_THRESHOLD,
+            {
+                IVF_PARTITION_STRATEGY_PARAMS_KEY,
+                IVF_GPU_MIN_WORK_THRESHOLD_KEY,
+            },
+        },
+        {
             IVF_PARTITION_STRATEGY_TYPE_KEY,
             {
                 IVF_PARTITION_STRATEGY_PARAMS_KEY,

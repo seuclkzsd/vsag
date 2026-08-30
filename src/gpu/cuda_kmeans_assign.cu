@@ -311,6 +311,15 @@ CudaAvailable() {
 }
 
 bool
+CudaSelectDevice(int32_t device_id) {
+    int count = 0;
+    if (cudaGetDeviceCount(&count) != cudaSuccess || device_id < 0 || device_id >= count) {
+        return false;
+    }
+    return cudaSetDevice(device_id) == cudaSuccess;
+}
+
+bool
 CudaAssignNearest(const float* query,
                   uint64_t query_count,
                   const float* centroids,
@@ -318,7 +327,8 @@ CudaAssignNearest(const float* query,
                   int32_t dim,
                   int32_t* labels,
                   double* error,
-                  uint64_t budget_bytes) {
+                  uint64_t budget_bytes,
+                  uint64_t min_work) {
     if (query == nullptr || centroids == nullptr || labels == nullptr || query_count == 0 ||
         k == 0 || dim <= 0) {
         return false;
@@ -326,7 +336,8 @@ CudaAssignNearest(const float* query,
     if (budget_bytes == 0) {
         return false;
     }
-    if (query_count * k < kMinWorkForGpu / (uint64_t)dim) {
+    const uint64_t work_floor = min_work > 0 ? min_work : kMinWorkForGpu;
+    if (query_count * k < work_floor / (uint64_t)dim) {
         return false;  // too small: CPU wins, see the crossover measurement
     }
     if (!CudaAvailable()) {

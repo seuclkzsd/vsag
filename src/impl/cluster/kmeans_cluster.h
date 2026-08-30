@@ -28,11 +28,28 @@ enum class KMeansInitMethod {
     KMEANS_PLUS_PLUS,
 };
 
+/// Opt-in settings for the CUDA build backend. Defaults leave it off, so a
+/// caller that does not ask for it keeps the CPU behaviour exactly.
+struct KMeansGpuConfig {
+    /// Allow the CUDA backend during training. Off unless asked for.
+    bool enabled{false};
+    /// CUDA device ordinal. An ordinal the machine does not have keeps the run
+    /// on the CPU rather than falling through to a different device.
+    int32_t device_id{0};
+    /// Ceiling on the device working set the chunked paths ask for, in bytes.
+    /// 0 derives it from what the device has free.
+    uint64_t memory_budget{0};
+    /// Smallest `count * k * dim` worth offloading. 0 uses the calibrated
+    /// default measured for this backend.
+    uint64_t min_work_threshold{0};
+};
+
 class KMeansCluster {
 public:
     explicit KMeansCluster(int32_t dim,
                            Allocator* allocator,
-                           SafeThreadPoolPtr thread_pool = nullptr);
+                           SafeThreadPoolPtr thread_pool = nullptr,
+                           KMeansGpuConfig gpu_config = {});
 
     ~KMeansCluster();
 
@@ -82,6 +99,8 @@ private:
     SafeThreadPoolPtr thread_pool_{nullptr};
 
     const int32_t dim_{0};
+
+    const KMeansGpuConfig gpu_config_{};
 
     static constexpr uint64_t THRESHOLD_FOR_HGRAPH = 10000ULL;
 

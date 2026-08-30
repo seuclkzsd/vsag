@@ -53,6 +53,14 @@ public:
     IVFPartitionStrategyType partition_strategy_type{IVFPartitionStrategyType::IVF};
     int32_t route_max_degree{64};
     int32_t route_ef_construction{300};
+    // Opt-in CUDA training backend. Off by default, so an index built without
+    // asking for it behaves exactly as it does today. These affect how the
+    // centroids are computed, not what the index looks like afterwards, so they
+    // are deliberately absent from CheckCompatibility.
+    bool enable_gpu_build{false};
+    int32_t gpu_device_id{0};
+    uint64_t gpu_memory_budget{0};        // 0: derive from free device memory
+    uint64_t gpu_min_work_threshold{0};   // 0: use the calibrated default
     GNOIMIParameterPtr gnoimi_param{nullptr};
 };
 

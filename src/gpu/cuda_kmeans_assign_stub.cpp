@@ -33,7 +33,8 @@ CudaAssignNearest(const float* /*query*/,
                   int32_t /*dim*/,
                   int32_t* /*labels*/,
                   double* /*error*/,
-                  uint64_t /*budget_bytes*/) {
+                  uint64_t /*budget_bytes*/,
+                  uint64_t /*min_work*/) {
     return false;
 }
 
@@ -63,6 +64,11 @@ CudaAccumulateCentroids(const float* /*datas*/,
 uint64_t
 CudaSuggestedBudget(uint64_t /*cap_bytes*/) {
     return 0;
+}
+
+bool
+CudaSelectDevice(int32_t /*device_id*/) {
+    return false;
 }
 
 }  // namespace vsag::gpu

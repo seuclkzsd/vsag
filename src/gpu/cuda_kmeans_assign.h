@@ -23,6 +23,12 @@ namespace vsag::gpu {
 bool
 CudaAvailable();
 
+/// Binds the calling thread to a device. Returns false for an ordinal the
+/// machine does not have, leaving the caller on its CPU path rather than
+/// silently using a different device than it asked for.
+bool
+CudaSelectDevice(int32_t device_id);
+
 /// Chunked GPU nearest-centroid assignment.
 ///
 /// Computes, for every row of `query` (query_count x dim, row-major), the index
@@ -33,6 +39,10 @@ CudaAvailable();
 /// are streamed in chunks so neither operand has to fit in VRAM. Returns false
 /// if the CUDA backend is unavailable or the problem is too small to be worth
 /// offloading, in which case the caller must use the CPU path.
+/// `min_work` is the smallest `query_count * k * dim` worth offloading; below it
+/// the launch and transfer overhead outweighs the device, and the function
+/// returns false so the caller stays on the CPU. Pass 0 for the calibrated
+/// default.
 bool
 CudaAssignNearest(const float* query,
                   uint64_t query_count,
@@ -41,7 +51,8 @@ CudaAssignNearest(const float* query,
                   int32_t dim,
                   int32_t* labels,
                   double* error,
-                  uint64_t budget_bytes);
+                  uint64_t budget_bytes,
+                  uint64_t min_work);
 
 /// GPU k-means++ seeding.
 ///

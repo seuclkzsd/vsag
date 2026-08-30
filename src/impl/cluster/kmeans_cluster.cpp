@@ -31,8 +31,14 @@
 #include "utils/util_functions.h"
 
 namespace vsag {
-KMeansCluster::KMeansCluster(int32_t dim, Allocator* allocator, SafeThreadPoolPtr thread_pool)
-    : dim_(dim), allocator_(allocator), thread_pool_(std::move(thread_pool)) {
+KMeansCluster::KMeansCluster(int32_t dim,
+                             Allocator* allocator,
+                             SafeThreadPoolPtr thread_pool,
+                             KMeansGpuConfig gpu_config)
+    : dim_(dim),
+      allocator_(allocator),
+      thread_pool_(std::move(thread_pool)),
+      gpu_config_(gpu_config) {
     if (thread_pool_ == nullptr) {
         this->thread_pool_ = SafeThreadPool::FactoryDefaultThreadPool();
     }
@@ -77,18 +83,24 @@ KMeansCluster::Run(uint32_t k,
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    const bool try_gpu = gpu::CudaAvailable();
+    // Opt-in, and a device the caller named but the machine does not have keeps
+    // the run on the CPU rather than quietly using a different one.
+    const bool try_gpu = gpu_config_.enabled and gpu::CudaAvailable() and
+                         gpu::CudaSelectDevice(gpu_config_.device_id);
+
     // Two budgets, because the two kinds of work want opposite things. Seeding
     // holds the training set resident, so it takes whatever the card has free.
     // The chunked paths reallocate their working set on every iteration, and a
     // set larger than what saturates the device only makes that allocation more
     // expensive, so they take a capped share.
+    const uint64_t chunk_cap =
+        gpu_config_.memory_budget > 0 ? gpu_config_.memory_budget : gpu::kChunkedBudgetCap;
     const uint64_t seed_budget = try_gpu ? gpu::CudaSuggestedBudget(0) : 0;
-    const uint64_t gpu_budget =
-        try_gpu ? gpu::CudaSuggestedBudget(gpu::kChunkedBudgetCap) : 0;
+    const uint64_t gpu_budget = try_gpu ? gpu::CudaSuggestedBudget(chunk_cap) : 0;
     if (try_gpu) {
-        logger::trace("KMeansCluster::Run using CUDA backend, seed budget {} MiB, "
+        logger::trace("KMeansCluster::Run using CUDA device {}, seed budget {} MiB, "
                       "chunk budget {} MiB",
+                      gpu_config_.device_id,
                       seed_budget >> 20,
                       gpu_budget >> 20);
     }
@@ -139,7 +151,8 @@ KMeansCluster::Run(uint32_t k,
                                               dim_,
                                               labels.data(),
                                               &total_err,
-                                              gpu_budget);
+                                              gpu_budget,
+                                              gpu_config_.min_work_threshold);
         }
         if (not assigned) {
             if (k < THRESHOLD_FOR_HGRAPH) {
