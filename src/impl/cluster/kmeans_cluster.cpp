@@ -78,11 +78,18 @@ KMeansCluster::Run(uint32_t k,
     std::mt19937 gen(rd());
 
     const bool try_gpu = gpu::CudaAvailable();
-    // Sized from what the device actually has free rather than a fixed guess, so
-    // the same build works on a small card and makes use of a large one.
-    const uint64_t gpu_budget = try_gpu ? gpu::CudaSuggestedBudget() : 0;
+    // Two budgets, because the two kinds of work want opposite things. Seeding
+    // holds the training set resident, so it takes whatever the card has free.
+    // The chunked paths reallocate their working set on every iteration, and a
+    // set larger than what saturates the device only makes that allocation more
+    // expensive, so they take a capped share.
+    const uint64_t seed_budget = try_gpu ? gpu::CudaSuggestedBudget(0) : 0;
+    const uint64_t gpu_budget =
+        try_gpu ? gpu::CudaSuggestedBudget(gpu::kChunkedBudgetCap) : 0;
     if (try_gpu) {
-        logger::trace("KMeansCluster::Run using CUDA backend, budget {} MiB",
+        logger::trace("KMeansCluster::Run using CUDA backend, seed budget {} MiB, "
+                      "chunk budget {} MiB",
+                      seed_budget >> 20,
                       gpu_budget >> 20);
     }
 
@@ -97,7 +104,7 @@ KMeansCluster::Run(uint32_t k,
                 u = unit(gen);
             }
             seeded = gpu::CudaKMeansPlusPlusInit(
-                datas, count, dim_, k, uniforms.data(), k_centroids_, gpu_budget);
+                datas, count, dim_, k, uniforms.data(), k_centroids_, seed_budget);
         }
         if (not seeded) {
             select_initial_centroids_kmeans_plus_plus(datas, count, k, gen);

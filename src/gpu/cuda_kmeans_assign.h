@@ -98,10 +98,25 @@ CudaAccumulateCentroids(const float* datas,
 /// free, rather than from a fixed guess.
 ///
 /// Leaves a fifth of the free memory to allocator fragmentation, the CUDA
-/// context's own growth, and anything else sharing the device, so a build stays
-/// well inside the ceiling the callers target. Returns 0 when no usable device
-/// is present, which every entry point below treats as "do not offload".
+/// context's own growth, and anything else sharing the device. Returns 0 when no
+/// usable device is present, which every entry point below treats as "do not
+/// offload".
+///
+/// `cap_bytes` bounds the result, and the two budgets in this header want very
+/// different bounds. Seeding has to hold the whole training set, so it should
+/// ask for everything available. The chunked paths do not: a larger working set
+/// buys nothing past the point where the kernels saturate the device, and it
+/// costs a proportionally larger allocation on every call. Measured on a 24 GiB
+/// card, letting them use the full 19 GiB doubled the runtime of three
+/// configurations, because each iteration then allocated and freed 8.6 GiB.
+/// Pass kChunkedBudgetCap for those.
 uint64_t
-CudaSuggestedBudget();
+CudaSuggestedBudget(uint64_t cap_bytes);
+
+/// Working-set ceiling for the chunked paths. A sweep over chunk sizes put the
+/// best runtime near a 1.1 GiB working set and showed 10.5 GiB was slower, so
+/// this leaves headroom over the optimum without paying for the rest of the
+/// card.
+constexpr uint64_t kChunkedBudgetCap = 2ULL << 30;
 
 }  // namespace vsag::gpu

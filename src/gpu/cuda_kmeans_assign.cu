@@ -711,13 +711,14 @@ done:
 }
 
 uint64_t
-CudaSuggestedBudget() {
+CudaSuggestedBudget(uint64_t cap_bytes) {
     size_t free_bytes = 0;
     size_t total_bytes = 0;
     if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
         return 0;
     }
-    return (uint64_t)((double)free_bytes * 0.8);
+    const uint64_t usable = (uint64_t)((double)free_bytes * 0.8);
+    return cap_bytes > 0 ? std::min<uint64_t>(usable, cap_bytes) : usable;
 }
 
 }  // namespace vsag::gpu

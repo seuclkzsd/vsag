@@ -61,7 +61,7 @@ CudaAccumulateCentroids(const float* /*datas*/,
 }
 
 uint64_t
-CudaSuggestedBudget() {
+CudaSuggestedBudget(uint64_t /*cap_bytes*/) {
     return 0;
 }
 
