@@ -143,6 +143,22 @@ KMeansCluster::Run(uint32_t k,
         Vector<float> new_centroids(static_cast<uint64_t>(k) * dim_, 0.0F, allocator_);
         std::mutex merge_mutex;
 
+        // Scattering each point into its centroid's accumulator is a memory
+        // bound pass. The CPU version below allocates and clears a k x dim
+        // buffer per 1024-point task, so it dominates the run once assignment
+        // itself is on the GPU.
+        bool accumulated = false;
+        if (try_gpu) {
+            accumulated = gpu::CudaAccumulateCentroids(datas,
+                                                       count,
+                                                       dim_,
+                                                       labels.data(),
+                                                       k,
+                                                       new_centroids.data(),
+                                                       counts.data(),
+                                                       GPU_MEMORY_BUDGET);
+        }
+
         auto update_centroids_func = [&](uint64_t start, uint64_t end) {
             omp_set_num_threads(1);
             Vector<int> local_counts(k, 0, allocator_);
@@ -178,14 +194,16 @@ KMeansCluster::Run(uint32_t k,
                 }
             }
         };
-        for (uint64_t i = 0; i < count; i += bs) {
-            futures.emplace_back(
-                thread_pool_->GeneralEnqueue(update_centroids_func, i, std::min(i + bs, count)));
+        if (not accumulated) {
+            for (uint64_t i = 0; i < count; i += bs) {
+                futures.emplace_back(thread_pool_->GeneralEnqueue(
+                    update_centroids_func, i, std::min(i + bs, count)));
+            }
+            for (auto& future : futures) {
+                future.wait();
+            }
+            futures.clear();
         }
-        for (auto& future : futures) {
-            future.wait();
-        }
-        futures.clear();
 
         std::uniform_int_distribution<uint64_t> dis(0, count - 1);
         for (int j = 0; j < k; ++j) {

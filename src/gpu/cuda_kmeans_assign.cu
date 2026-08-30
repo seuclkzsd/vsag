@@ -266,6 +266,39 @@ kpp_select(const float* __restrict__ block_sum,
     }
 }
 
+// ---------------------------------------------------------------------------
+// centroid accumulation
+// ---------------------------------------------------------------------------
+
+// One warp per point, threads spread along dim so the reads coalesce. The
+// atomics see little contention in practice: with k centroids over count
+// points only about count/k rows compete for the same accumulator.
+__global__ void
+accumulate_centroids(const float* __restrict__ data,
+                     const int32_t* __restrict__ labels,
+                     uint64_t rows,
+                     int dim,
+                     uint32_t k,
+                     float* __restrict__ sums,
+                     int32_t* __restrict__ counts) {
+    const uint64_t row = (uint64_t)blockIdx.x * blockDim.y + threadIdx.y;
+    if (row >= rows) {
+        return;
+    }
+    const int32_t lab = labels[row];
+    if (lab < 0 || (uint32_t)lab >= k) {
+        return;
+    }
+    const float* p = data + row * (uint64_t)dim;
+    float* dst = sums + (uint64_t)lab * (uint64_t)dim;
+    for (int j = (int)threadIdx.x; j < dim; j += warpSize) {
+        atomicAdd(dst + j, p[j]);
+    }
+    if (threadIdx.x == 0) {
+        atomicAdd(counts + lab, 1);
+    }
+}
+
 }  // namespace
 
 bool
@@ -582,6 +615,90 @@ CudaKMeansPlusPlusInit(const float* datas,
         std::copy(datas + idx * (uint64_t)dim,
                   datas + (idx + 1) * (uint64_t)dim,
                   centroids_out + (uint64_t)c * (uint64_t)dim);
+    }
+
+done:
+    cleanup();
+#undef TRY
+    return ok;
+}
+
+bool
+CudaAccumulateCentroids(const float* datas,
+                        uint64_t count,
+                        int32_t dim,
+                        const int32_t* labels,
+                        uint32_t k,
+                        float* sums,
+                        int32_t* counts,
+                        uint64_t budget_bytes) {
+    if (datas == nullptr || labels == nullptr || sums == nullptr || counts == nullptr ||
+        count == 0 || k == 0 || dim <= 0) {
+        return false;
+    }
+    if (!CudaAvailable()) {
+        return false;
+    }
+
+    const uint64_t sum_bytes = (uint64_t)k * (uint64_t)dim * sizeof(float);
+    const uint64_t cnt_bytes = (uint64_t)k * sizeof(int32_t);
+    if (sum_bytes + cnt_bytes >= budget_bytes) {
+        return false;
+    }
+
+    // Points are copied straight out of the caller's buffer. Staging them
+    // through pinned memory would be faster per byte, but this runs once per
+    // k-means iteration and page-locking a chunk-sized host buffer every time
+    // costs more than the transfer it accelerates.
+    const uint64_t per_row = (uint64_t)dim * sizeof(float) + sizeof(int32_t);
+    const uint64_t remain = budget_bytes - sum_bytes - cnt_bytes;
+    const uint64_t n_chunk =
+        std::max<uint64_t>(1024, std::min<uint64_t>(count, remain / per_row));
+
+    float* d_data = nullptr;
+    int32_t* d_lab = nullptr;
+    float* d_sums = nullptr;
+    int32_t* d_counts = nullptr;
+    bool ok = true;
+
+    auto cleanup = [&]() {
+        if (d_data != nullptr) cudaFree(d_data);
+        if (d_lab != nullptr) cudaFree(d_lab);
+        if (d_sums != nullptr) cudaFree(d_sums);
+        if (d_counts != nullptr) cudaFree(d_counts);
+    };
+
+#define TRY(expr)                \
+    if ((expr) != cudaSuccess) { \
+        ok = false;              \
+        goto done;               \
+    }
+
+    TRY(cudaMalloc(&d_sums, sum_bytes));
+    TRY(cudaMalloc(&d_counts, cnt_bytes));
+    TRY(cudaMalloc(&d_data, n_chunk * (uint64_t)dim * sizeof(float)));
+    TRY(cudaMalloc(&d_lab, n_chunk * sizeof(int32_t)));
+    TRY(cudaMemset(d_sums, 0, sum_bytes));
+    TRY(cudaMemset(d_counts, 0, cnt_bytes));
+
+    {
+        const dim3 threads(32, 8);
+        for (uint64_t off = 0; off < count; off += n_chunk) {
+            const uint64_t cur = std::min<uint64_t>(n_chunk, count - off);
+            TRY(cudaMemcpy(d_data,
+                           datas + off * (uint64_t)dim,
+                           cur * (uint64_t)dim * sizeof(float),
+                           cudaMemcpyHostToDevice));
+            TRY(cudaMemcpy(
+                d_lab, labels + off, cur * sizeof(int32_t), cudaMemcpyHostToDevice));
+            const uint64_t blocks = (cur + threads.y - 1) / threads.y;
+            accumulate_centroids<<<(int)blocks, threads>>>(
+                d_data, d_lab, cur, dim, k, d_sums, d_counts);
+        }
+        TRY(cudaDeviceSynchronize());
+        TRY(cudaGetLastError());
+        TRY(cudaMemcpy(sums, d_sums, sum_bytes, cudaMemcpyDeviceToHost));
+        TRY(cudaMemcpy(counts, d_counts, cnt_bytes, cudaMemcpyDeviceToHost));
     }
 
 done:

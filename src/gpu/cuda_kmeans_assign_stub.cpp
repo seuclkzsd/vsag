@@ -48,4 +48,16 @@ CudaKMeansPlusPlusInit(const float* /*datas*/,
     return false;
 }
 
+bool
+CudaAccumulateCentroids(const float* /*datas*/,
+                        uint64_t /*count*/,
+                        int32_t /*dim*/,
+                        const int32_t* /*labels*/,
+                        uint32_t /*k*/,
+                        float* /*sums*/,
+                        int32_t* /*counts*/,
+                        uint64_t /*budget_bytes*/) {
+    return false;
+}
+
 }  // namespace vsag::gpu

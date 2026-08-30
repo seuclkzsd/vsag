@@ -69,4 +69,29 @@ CudaKMeansPlusPlusInit(const float* datas,
                        float* centroids_out,
                        uint64_t budget_bytes);
 
+/// Sums every point into the accumulator of the centroid it was assigned to.
+///
+/// Writes the per-centroid sums to `sums` (k x dim, row-major) and the number
+/// of points that landed on each centroid to `counts` (k), both overwritten
+/// rather than accumulated. The caller divides one by the other and decides
+/// what to do with empty clusters.
+///
+/// Points are streamed in chunks, so nothing has to fit in VRAM beyond the
+/// accumulators themselves. Returns false if the backend is unavailable or the
+/// accumulators do not fit in `budget_bytes`, in which case the caller must
+/// accumulate on the CPU.
+///
+/// The sums are built with floating-point atomics, so their rounding depends on
+/// the order the additions happen to land in and differs slightly from a serial
+/// accumulation.
+bool
+CudaAccumulateCentroids(const float* datas,
+                        uint64_t count,
+                        int32_t dim,
+                        const int32_t* labels,
+                        uint32_t k,
+                        float* sums,
+                        int32_t* counts,
+                        uint64_t budget_bytes);
+
 }  // namespace vsag::gpu
