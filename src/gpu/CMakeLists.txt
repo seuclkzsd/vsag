@@ -38,3 +38,18 @@ endif ()
 
 target_include_directories (vsag_gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 maybe_add_dependencies (vsag_gpu spdlog boost mkl openblas)
+
+if (ENABLE_TESTS)
+    # gpu_plan.h is deliberately free of CUDA so the sizing decisions can be
+    # covered on a machine without a device, which is what CI has. The kernels
+    # themselves stay untested here.
+    file (GLOB GPU_TESTS "*_test.cpp")
+    add_library (gpu_test STATIC ${GPU_TESTS})
+    # This directory clears the inherited compile options because nvcc rejects
+    # them, so put the project's C++ flags back on the host-only test target.
+    separate_arguments (_gpu_test_flags NATIVE_COMMAND "${VSAG_EXTERNAL_CXX_FLAGS}")
+    target_compile_options (gpu_test PRIVATE ${_gpu_test_flags})
+    target_link_libraries (gpu_test PRIVATE Catch2::Catch2 vsag_static unittest_deps)
+    vsag_link_openmp_private (gpu_test)
+    add_dependencies (gpu_test Catch2)
+endif ()

@@ -19,11 +19,11 @@
 #include <vector>
 
 #include "cuda_kmeans_assign.h"
+#include "gpu_plan.h"
 
 namespace vsag::gpu {
 namespace {
 
-constexpr uint64_t kMinWorkForGpu = 1ULL << 31;  // n * k * dim below this: CPU wins
 constexpr int kThreads = 256;
 constexpr float kFloatMax = 3.402823466e+38F;
 
@@ -114,9 +114,7 @@ add_qsqr(const float* __restrict__ q_sqr, float* __restrict__ best_val, int n) {
 // The dataset is split into kInitBlocks contiguous tiles so that a partial sum
 // of the D^2 weights is available per tile; the weighted draw then only has to
 // walk the tile sums plus the one tile it lands in.
-constexpr int32_t kInitBlocks = 1024;
 constexpr int32_t kInitWarps = 8;
-constexpr uint64_t kMaxInitShared = 44U << 10;  // stay clear of the 48 KiB limit
 
 __global__ void
 fill_float(float* __restrict__ p, uint64_t n, float v) {
@@ -333,33 +331,22 @@ CudaAssignNearest(const float* query,
         k == 0 || dim <= 0) {
         return false;
     }
-    if (budget_bytes == 0) {
-        return false;
-    }
-    const uint64_t work_floor = min_work > 0 ? min_work : kMinWorkForGpu;
-    if (query_count * k < work_floor / (uint64_t)dim) {
-        return false;  // too small: CPU wins, see the crossover measurement
-    }
     if (!CudaAvailable()) {
         return false;
     }
-
-    // Centroids stay resident when they fit; otherwise they are streamed in
-    // k_chunk slices. Both slots of every per-stream buffer are sized here so
-    // the two streams never touch the same memory -- that is what lets the
-    // transfer of one chunk overlap the compute of the previous one.
-    const uint64_t cent_bytes = k * (uint64_t)dim * sizeof(float);
-    const bool cent_resident = cent_bytes * 2 < budget_bytes;
-    const uint64_t k_chunk = cent_resident ? k : std::min<uint64_t>(k, 8192);
-    const uint64_t cent_slots = cent_resident ? 1 : 2;  // streamed centroids need one per stream
+    // Both slots of every per-stream buffer are sized here so the two streams
+    // never touch the same memory -- that is what lets the transfer of one
+    // chunk overlap the compute of the previous one.
+    const AssignPlan plan = PlanAssign(query_count, k, dim, budget_bytes, min_work);
+    if (not plan.offload) {
+        return false;
+    }
+    const bool cent_resident = plan.centroids_resident;
+    const uint64_t k_chunk = plan.k_chunk;
+    const uint64_t cent_slots = plan.centroid_slots;
     const uint64_t cent_alloc = cent_resident ? k : k_chunk;
-    uint64_t remain = budget_bytes > cent_bytes ? budget_bytes - cent_bytes : budget_bytes / 2;
-    // Per query row, both slots together: query 2*dim floats, distances
-    // 2*k_chunk floats, and 2*(best + qsqr + bidx) = 24 bytes of scalars.
-    const uint64_t per_row =
-        (uint64_t)dim * 2 * sizeof(float) + k_chunk * 2 * sizeof(float) + 24;
-    const uint64_t n_chunk =
-        std::max<uint64_t>(1024, std::min<uint64_t>(query_count, remain / per_row));
+    const uint64_t cent_bytes = k * (uint64_t)dim * sizeof(float);
+    const uint64_t n_chunk = plan.n_chunk;
 
     cublasHandle_t handle[2] = {nullptr, nullptr};
     cudaStream_t stream[2] = {nullptr, nullptr};
@@ -549,23 +536,14 @@ CudaKMeansPlusPlusInit(const float* datas,
         return false;
     }
 
-    const int32_t nblocks = (int32_t)std::min<uint64_t>(kInitBlocks, count);
-    const uint64_t rows_per_block = (count + (uint64_t)nblocks - 1) / (uint64_t)nblocks;
-
-    // kpp_select stages the tile sums and one tile of weights in shared memory.
-    const uint64_t shared_bytes = ((uint64_t)nblocks + rows_per_block) * sizeof(float);
-    if (shared_bytes > kMaxInitShared) {
+    const SeedPlan plan = PlanSeed(count, dim, k, budget_bytes);
+    if (not plan.offload) {
         return false;
     }
-
-    // Every step sweeps the whole dataset, so it has to stay resident; there is
-    // nothing to gain from streaming it k times.
+    const int32_t nblocks = plan.blocks;
+    const uint64_t rows_per_block = plan.rows_per_block;
+    const uint64_t shared_bytes = plan.shared_bytes;
     const uint64_t data_bytes = count * (uint64_t)dim * sizeof(float);
-    const uint64_t need = data_bytes + count * sizeof(float) +
-                          (uint64_t)nblocks * sizeof(float) + (uint64_t)k * sizeof(uint64_t);
-    if (need > budget_bytes) {
-        return false;
-    }
 
     float* d_data = nullptr;
     float* d_min = nullptr;
@@ -654,20 +632,17 @@ CudaAccumulateCentroids(const float* datas,
         return false;
     }
 
-    const uint64_t sum_bytes = (uint64_t)k * (uint64_t)dim * sizeof(float);
-    const uint64_t cnt_bytes = (uint64_t)k * sizeof(int32_t);
-    if (sum_bytes + cnt_bytes >= budget_bytes) {
-        return false;
-    }
-
     // Points are copied straight out of the caller's buffer. Staging them
     // through pinned memory would be faster per byte, but this runs once per
     // k-means iteration and page-locking a chunk-sized host buffer every time
     // costs more than the transfer it accelerates.
-    const uint64_t per_row = (uint64_t)dim * sizeof(float) + sizeof(int32_t);
-    const uint64_t remain = budget_bytes - sum_bytes - cnt_bytes;
-    const uint64_t n_chunk =
-        std::max<uint64_t>(1024, std::min<uint64_t>(count, remain / per_row));
+    const AccumulatePlan plan = PlanAccumulate(count, dim, k, budget_bytes);
+    if (not plan.offload) {
+        return false;
+    }
+    const uint64_t sum_bytes = (uint64_t)k * (uint64_t)dim * sizeof(float);
+    const uint64_t cnt_bytes = (uint64_t)k * sizeof(int32_t);
+    const uint64_t n_chunk = plan.n_chunk;
 
     float* d_data = nullptr;
     int32_t* d_lab = nullptr;
@@ -728,8 +703,7 @@ CudaSuggestedBudget(uint64_t cap_bytes) {
     if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
         return 0;
     }
-    const uint64_t usable = (uint64_t)((double)free_bytes * 0.8);
-    return cap_bytes > 0 ? std::min<uint64_t>(usable, cap_bytes) : usable;
+    return CapBudget((uint64_t)free_bytes, cap_bytes);
 }
 
 }  // namespace vsag::gpu

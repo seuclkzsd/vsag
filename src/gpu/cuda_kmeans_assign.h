@@ -17,6 +17,8 @@
 
 #include <cstdint>
 
+#include "gpu_plan.h"
+
 namespace vsag::gpu {
 
 /// True when this build has a CUDA backend and at least one usable device.
@@ -124,10 +126,6 @@ CudaAccumulateCentroids(const float* datas,
 uint64_t
 CudaSuggestedBudget(uint64_t cap_bytes);
 
-/// Working-set ceiling for the chunked paths. A sweep over chunk sizes put the
-/// best runtime near a 1.1 GiB working set and showed 10.5 GiB was slower, so
-/// this leaves headroom over the optimum without paying for the rest of the
-/// card.
-constexpr uint64_t kChunkedBudgetCap = 2ULL << 30;
+
 
 }  // namespace vsag::gpu
