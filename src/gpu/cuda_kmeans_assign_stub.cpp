@@ -60,4 +60,9 @@ CudaAccumulateCentroids(const float* /*datas*/,
     return false;
 }
 
+uint64_t
+CudaSuggestedBudget() {
+    return 0;
+}
+
 }  // namespace vsag::gpu

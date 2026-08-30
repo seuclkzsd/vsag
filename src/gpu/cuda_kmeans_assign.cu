@@ -323,6 +323,9 @@ CudaAssignNearest(const float* query,
         k == 0 || dim <= 0) {
         return false;
     }
+    if (budget_bytes == 0) {
+        return false;
+    }
     if (query_count * k < kMinWorkForGpu / (uint64_t)dim) {
         return false;  // too small: CPU wins, see the crossover measurement
     }
@@ -705,6 +708,16 @@ done:
     cleanup();
 #undef TRY
     return ok;
+}
+
+uint64_t
+CudaSuggestedBudget() {
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
+        return 0;
+    }
+    return (uint64_t)((double)free_bytes * 0.8);
 }
 
 }  // namespace vsag::gpu

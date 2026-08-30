@@ -94,4 +94,14 @@ CudaAccumulateCentroids(const float* datas,
                         int32_t* counts,
                         uint64_t budget_bytes);
 
+/// Device working-set budget derived from what the selected device actually has
+/// free, rather than from a fixed guess.
+///
+/// Leaves a fifth of the free memory to allocator fragmentation, the CUDA
+/// context's own growth, and anything else sharing the device, so a build stays
+/// well inside the ceiling the callers target. Returns 0 when no usable device
+/// is present, which every entry point below treats as "do not offload".
+uint64_t
+CudaSuggestedBudget();
+
 }  // namespace vsag::gpu

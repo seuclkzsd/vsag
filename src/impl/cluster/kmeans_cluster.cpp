@@ -77,18 +77,27 @@ KMeansCluster::Run(uint32_t k,
     std::random_device rd;
     std::mt19937 gen(rd());
 
+    const bool try_gpu = gpu::CudaAvailable();
+    // Sized from what the device actually has free rather than a fixed guess, so
+    // the same build works on a small card and makes use of a large one.
+    const uint64_t gpu_budget = try_gpu ? gpu::CudaSuggestedBudget() : 0;
+    if (try_gpu) {
+        logger::trace("KMeansCluster::Run using CUDA backend, budget {} MiB",
+                      gpu_budget >> 20);
+    }
+
     if (init_method == KMeansInitMethod::KMEANS_PLUS_PLUS) {
         // The seeding sweeps the whole dataset once per centroid, so on the CPU
         // it dominates the run for large k. Offload it when a device is around.
         bool seeded = false;
-        if (gpu::CudaAvailable()) {
+        if (try_gpu) {
             std::vector<float> uniforms(2ULL * static_cast<uint64_t>(k));
             std::uniform_real_distribution<float> unit(0.0F, 1.0F);
             for (auto& u : uniforms) {
                 u = unit(gen);
             }
             seeded = gpu::CudaKMeansPlusPlusInit(
-                datas, count, dim_, k, uniforms.data(), k_centroids_, GPU_MEMORY_BUDGET);
+                datas, count, dim_, k, uniforms.data(), k_centroids_, gpu_budget);
         }
         if (not seeded) {
             select_initial_centroids_kmeans_plus_plus(datas, count, k, gen);
@@ -113,10 +122,6 @@ KMeansCluster::Run(uint32_t k,
         logger::trace("KMeansCluster::Run use hgraph");
     }
 
-    const bool try_gpu = gpu::CudaAvailable();
-    if (try_gpu) {
-        logger::trace("KMeansCluster::Run using CUDA backend");
-    }
     for (int it = 0; it < iter; ++it) {
         bool assigned = false;
         if (try_gpu) {
@@ -127,7 +132,7 @@ KMeansCluster::Run(uint32_t k,
                                               dim_,
                                               labels.data(),
                                               &total_err,
-                                              GPU_MEMORY_BUDGET);
+                                              gpu_budget);
         }
         if (not assigned) {
             if (k < THRESHOLD_FOR_HGRAPH) {
@@ -156,7 +161,7 @@ KMeansCluster::Run(uint32_t k,
                                                        k,
                                                        new_centroids.data(),
                                                        counts.data(),
-                                                       GPU_MEMORY_BUDGET);
+                                                       gpu_budget);
         }
 
         auto update_centroids_func = [&](uint64_t start, uint64_t end) {
