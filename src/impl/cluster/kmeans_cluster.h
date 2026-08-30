@@ -83,7 +83,7 @@ private:
 
     const int32_t dim_{0};
 
-    static constexpr uint64_t THRESHOLD_FOR_HGRAPH = 10000ULL;
+    static constexpr uint64_t THRESHOLD_FOR_HGRAPH = 1000000000ULL;  // 测量专用：强制走 BLAS 精确路径
 
     static constexpr uint64_t QUERY_BS = 65536ULL;
 
