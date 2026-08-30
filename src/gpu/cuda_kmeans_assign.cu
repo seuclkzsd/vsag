@@ -1,4 +1,3 @@
-
 // Copyright 2024-present the vsag project
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +16,6 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
-#include <cstdio>
 #include <vector>
 
 #include "cuda_kmeans_assign.h"
@@ -25,22 +23,15 @@
 namespace vsag::gpu {
 namespace {
 
-constexpr uint64_t kMinWorkForGpu = 1ULL << 31;  // 2^31 query*k pairs*dim, see report
+constexpr uint64_t kMinWorkForGpu = 1ULL << 31;  // n * k * dim below this: CPU wins
 constexpr int kThreads = 256;
-
-#define VSAG_CUDA_TRY(expr)                     \
-    do {                                        \
-        cudaError_t _e = (expr);                \
-        if (_e != cudaSuccess) {                \
-            return false;                       \
-        }                                       \
-    } while (0)
+constexpr float kFloatMax = 3.402823466e+38F;
 
 __global__ void
 init_best(float* best_val, int* best_idx, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        best_val[i] = 3.402823466e+38F;
+        best_val[i] = kFloatMax;
         best_idx[i] = -1;
     }
 }
@@ -74,7 +65,6 @@ fused_add_csqr_argmin(const float* __restrict__ dist,
                       int ld,
                       const float* __restrict__ c_sqr,
                       int kc,
-                      int n,
                       int centroid_offset,
                       int* __restrict__ best_idx,
                       float* __restrict__ best_val) {
@@ -84,7 +74,7 @@ fused_add_csqr_argmin(const float* __restrict__ dist,
 
     int q = blockIdx.x;
     const float* col = dist + (size_t)q * ld;
-    float lv = 3.402823466e+38F;
+    float lv = kFloatMax;
     int li = -1;
     for (int c = threadIdx.x; c < kc; c += blockDim.x) {
         float v = col[c] + c_sqr[c];
@@ -148,127 +138,187 @@ CudaAssignNearest(const float* query,
         return false;
     }
 
-    // Split the budget: centroids resident if they fit, then two query buffers
-    // and two distance buffers (double buffering across two streams).
+    // Centroids stay resident when they fit; otherwise they are streamed in
+    // k_chunk slices. Both slots of every per-stream buffer are sized here so
+    // the two streams never touch the same memory -- that is what lets the
+    // transfer of one chunk overlap the compute of the previous one.
     const uint64_t cent_bytes = k * (uint64_t)dim * sizeof(float);
     const bool cent_resident = cent_bytes * 2 < budget_bytes;
-    uint64_t k_chunk = cent_resident ? k : std::min<uint64_t>(k, 8192);
+    const uint64_t k_chunk = cent_resident ? k : std::min<uint64_t>(k, 8192);
+    const uint64_t cent_slots = cent_resident ? 1 : 2;  // streamed centroids need one per stream
+    const uint64_t cent_alloc = cent_resident ? k : k_chunk;
     uint64_t remain = budget_bytes > cent_bytes ? budget_bytes - cent_bytes : budget_bytes / 2;
-    // per query row: dim floats (x2 buffers) + k_chunk floats of dist (x2) + 3 scalars
-    uint64_t per_row = (uint64_t)dim * 2 * sizeof(float) + k_chunk * 2 * sizeof(float) + 16;
-    uint64_t n_chunk = std::max<uint64_t>(1024, std::min<uint64_t>(query_count, remain / per_row));
+    // Per query row, both slots together: query 2*dim floats, distances
+    // 2*k_chunk floats, and 2*(best + qsqr + bidx) = 24 bytes of scalars.
+    const uint64_t per_row =
+        (uint64_t)dim * 2 * sizeof(float) + k_chunk * 2 * sizeof(float) + 24;
+    const uint64_t n_chunk =
+        std::max<uint64_t>(1024, std::min<uint64_t>(query_count, remain / per_row));
 
-    cublasHandle_t handle = nullptr;
-    if (cublasCreate(&handle) != CUBLAS_STATUS_SUCCESS) {
-        return false;
-    }
-    cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH);  // keep FP32: TF32 perturbs labels
-
+    cublasHandle_t handle[2] = {nullptr, nullptr};
     cudaStream_t stream[2] = {nullptr, nullptr};
-    float *d_q[2] = {nullptr, nullptr}, *d_dist[2] = {nullptr, nullptr};
-    float *d_cent = nullptr, *d_csqr = nullptr, *d_best = nullptr, *d_qsqr = nullptr;
-    int* d_bidx = nullptr;
-    float *h_q[2] = {nullptr, nullptr};
-    int* h_lab = nullptr;
-    float* h_val = nullptr;
+    float* d_q[2] = {nullptr, nullptr};
+    float* d_dist[2] = {nullptr, nullptr};
+    float* d_best[2] = {nullptr, nullptr};
+    float* d_qsqr[2] = {nullptr, nullptr};
+    int* d_bidx[2] = {nullptr, nullptr};
+    float* d_cent[2] = {nullptr, nullptr};
+    float* d_csqr[2] = {nullptr, nullptr};
+    float* h_q[2] = {nullptr, nullptr};
+    int* h_lab[2] = {nullptr, nullptr};
+    float* h_val[2] = {nullptr, nullptr};
+
+    // Chunk currently in flight on each stream, waiting to be copied out.
+    uint64_t pend_off[2] = {0, 0};
+    uint64_t pend_cnt[2] = {0, 0};
+    double err_acc = 0.0;
     bool ok = true;
 
     auto cleanup = [&]() {
         for (int i = 0; i < 2; ++i) {
-            if (d_q[i]) cudaFree(d_q[i]);
-            if (d_dist[i]) cudaFree(d_dist[i]);
-            if (h_q[i]) cudaFreeHost(h_q[i]);
-            if (stream[i]) cudaStreamDestroy(stream[i]);
+            if (d_q[i] != nullptr) cudaFree(d_q[i]);
+            if (d_dist[i] != nullptr) cudaFree(d_dist[i]);
+            if (d_best[i] != nullptr) cudaFree(d_best[i]);
+            if (d_qsqr[i] != nullptr) cudaFree(d_qsqr[i]);
+            if (d_bidx[i] != nullptr) cudaFree(d_bidx[i]);
+            if (d_cent[i] != nullptr) cudaFree(d_cent[i]);
+            if (d_csqr[i] != nullptr) cudaFree(d_csqr[i]);
+            if (h_q[i] != nullptr) cudaFreeHost(h_q[i]);
+            if (h_lab[i] != nullptr) cudaFreeHost(h_lab[i]);
+            if (h_val[i] != nullptr) cudaFreeHost(h_val[i]);
+            if (handle[i] != nullptr) cublasDestroy(handle[i]);
+            if (stream[i] != nullptr) cudaStreamDestroy(stream[i]);
         }
-        if (d_cent) cudaFree(d_cent);
-        if (d_csqr) cudaFree(d_csqr);
-        if (d_best) cudaFree(d_best);
-        if (d_qsqr) cudaFree(d_qsqr);
-        if (d_bidx) cudaFree(d_bidx);
-        if (h_lab) cudaFreeHost(h_lab);
-        if (h_val) cudaFreeHost(h_val);
-        if (handle) cublasDestroy(handle);
     };
 
-#define TRY(expr)                    \
-    if ((expr) != cudaSuccess) {     \
-        ok = false;                  \
-        goto done;                   \
+    // Copies one finished chunk's labels and distances out of pinned memory.
+    // The caller must have synchronized that slot's stream first.
+    auto drain = [&](int slot) {
+        for (uint64_t i = 0; i < pend_cnt[slot]; ++i) {
+            labels[pend_off[slot] + i] = h_lab[slot][i];
+            err_acc += h_val[slot][i];
+        }
+        pend_cnt[slot] = 0;
+    };
+
+#define TRY(expr)                \
+    if ((expr) != cudaSuccess) { \
+        ok = false;              \
+        goto done;               \
     }
 
-    TRY(cudaStreamCreate(&stream[0]));
-    TRY(cudaStreamCreate(&stream[1]));
-    TRY(cudaMalloc(&d_cent, (cent_resident ? k : k_chunk) * dim * sizeof(float)));
-    TRY(cudaMalloc(&d_csqr, (cent_resident ? k : k_chunk) * sizeof(float)));
-    TRY(cudaMalloc(&d_best, n_chunk * sizeof(float)));
-    TRY(cudaMalloc(&d_qsqr, n_chunk * sizeof(float)));
-    TRY(cudaMalloc(&d_bidx, n_chunk * sizeof(int)));
-    TRY(cudaHostAlloc(&h_lab, n_chunk * sizeof(int), cudaHostAllocDefault));
-    TRY(cudaHostAlloc(&h_val, n_chunk * sizeof(float), cudaHostAllocDefault));
     for (int i = 0; i < 2; ++i) {
+        TRY(cudaStreamCreate(&stream[i]));
         TRY(cudaMalloc(&d_q[i], n_chunk * dim * sizeof(float)));
         TRY(cudaMalloc(&d_dist[i], k_chunk * n_chunk * sizeof(float)));
+        TRY(cudaMalloc(&d_best[i], n_chunk * sizeof(float)));
+        TRY(cudaMalloc(&d_qsqr[i], n_chunk * sizeof(float)));
+        TRY(cudaMalloc(&d_bidx[i], n_chunk * sizeof(int)));
         TRY(cudaHostAlloc(&h_q[i], n_chunk * dim * sizeof(float), cudaHostAllocDefault));
+        TRY(cudaHostAlloc(&h_lab[i], n_chunk * sizeof(int), cudaHostAllocDefault));
+        TRY(cudaHostAlloc(&h_val[i], n_chunk * sizeof(float), cudaHostAllocDefault));
+        // One cuBLAS handle per stream: a shared handle serialises its internal
+        // workspace across the two streams and would defeat the overlap.
+        if (cublasCreate(&handle[i]) != CUBLAS_STATUS_SUCCESS) {
+            ok = false;
+            goto done;
+        }
+        cublasSetMathMode(handle[i], CUBLAS_PEDANTIC_MATH);  // keep FP32: TF32 perturbs labels
+        cublasSetStream(handle[i], stream[i]);
+    }
+    for (uint64_t s = 0; s < cent_slots; ++s) {
+        TRY(cudaMalloc(&d_cent[s], cent_alloc * dim * sizeof(float)));
+        TRY(cudaMalloc(&d_csqr[s], cent_alloc * sizeof(float)));
     }
 
     if (cent_resident) {
-        TRY(cudaMemcpy(d_cent, centroids, cent_bytes, cudaMemcpyHostToDevice));
-        row_sqr_norms<<<(int)k, kThreads>>>(d_cent, dim, (int)k, d_csqr);
+        TRY(cudaMemcpyAsync(
+            d_cent[0], centroids, cent_bytes, cudaMemcpyHostToDevice, stream[0]));
+        row_sqr_norms<<<(int)k, kThreads, 0, stream[0]>>>(d_cent[0], dim, (int)k, d_csqr[0]);
+        // Both streams read these, so the upload has to land before either starts.
+        TRY(cudaStreamSynchronize(stream[0]));
     }
 
-    {
-        double err_acc = 0.0;
-        int buf = 0;
-        for (uint64_t off = 0; off < query_count; off += n_chunk) {
-            uint64_t cur = std::min<uint64_t>(n_chunk, query_count - off);
-            cudaStream_t st = stream[buf];
-            TRY(cudaStreamSynchronize(st));
-            std::copy(query + off * dim, query + (off + cur) * dim, h_q[buf]);
-            TRY(cudaMemcpyAsync(d_q[buf], h_q[buf], cur * dim * sizeof(float),
-                                cudaMemcpyHostToDevice, st));
-            init_best<<<(int)((cur + kThreads - 1) / kThreads), kThreads, 0, st>>>(
-                d_best, d_bidx, (int)cur);
-            row_sqr_norms<<<(int)cur, kThreads, 0, st>>>(d_q[buf], dim, (int)cur, d_qsqr);
+    for (uint64_t off = 0, chunk = 0; off < query_count; off += n_chunk, ++chunk) {
+        const uint64_t cur = std::min<uint64_t>(n_chunk, query_count - off);
+        const int buf = (int)(chunk & 1U);
+        const cudaStream_t st = stream[buf];
 
-            for (uint64_t koff = 0; koff < k; koff += k_chunk) {
-                uint64_t kc = std::min<uint64_t>(k_chunk, k - koff);
-                const float* cptr = d_cent;
-                const float* sptr = d_csqr;
-                if (cent_resident) {
-                    cptr = d_cent + koff * dim;
-                    sptr = d_csqr + koff;
-                } else {
-                    TRY(cudaMemcpyAsync(d_cent, centroids + koff * dim,
-                                        kc * dim * sizeof(float), cudaMemcpyHostToDevice, st));
-                    row_sqr_norms<<<(int)kc, kThreads, 0, st>>>(d_cent, dim, (int)kc, d_csqr);
-                }
-                const float alpha = -2.0F, beta = 0.0F;
-                cublasSetStream(handle, st);
-                if (cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)kc, (int)cur, dim,
-                                &alpha, cptr, dim, d_q[buf], dim, &beta, d_dist[buf],
-                                (int)kc) != CUBLAS_STATUS_SUCCESS) {
-                    ok = false;
-                    goto done;
-                }
-                fused_add_csqr_argmin<<<(int)cur, kThreads,
-                                        kThreads * (sizeof(float) + sizeof(int)), st>>>(
-                    d_dist[buf], (int)kc, sptr, (int)kc, (int)cur, (int)koff, d_bidx, d_best);
+        // Wait only for the chunk that used this slot two iterations ago; the
+        // chunk on the other stream keeps running.
+        TRY(cudaStreamSynchronize(st));
+        drain(buf);
+
+        std::copy(query + off * dim, query + (off + cur) * dim, h_q[buf]);
+        TRY(cudaMemcpyAsync(
+            d_q[buf], h_q[buf], cur * dim * sizeof(float), cudaMemcpyHostToDevice, st));
+        init_best<<<(int)((cur + kThreads - 1) / kThreads), kThreads, 0, st>>>(
+            d_best[buf], d_bidx[buf], (int)cur);
+        row_sqr_norms<<<(int)cur, kThreads, 0, st>>>(d_q[buf], dim, (int)cur, d_qsqr[buf]);
+
+        for (uint64_t koff = 0; koff < k; koff += k_chunk) {
+            const uint64_t kc = std::min<uint64_t>(k_chunk, k - koff);
+            const float* cptr = nullptr;
+            const float* sptr = nullptr;
+            if (cent_resident) {
+                cptr = d_cent[0] + koff * dim;
+                sptr = d_csqr[0] + koff;
+            } else {
+                // Each stream owns its own centroid slice, so the two uploads
+                // cannot clobber each other.
+                TRY(cudaMemcpyAsync(d_cent[buf],
+                                    centroids + koff * dim,
+                                    kc * dim * sizeof(float),
+                                    cudaMemcpyHostToDevice,
+                                    st));
+                row_sqr_norms<<<(int)kc, kThreads, 0, st>>>(
+                    d_cent[buf], dim, (int)kc, d_csqr[buf]);
+                cptr = d_cent[buf];
+                sptr = d_csqr[buf];
             }
-            add_qsqr<<<(int)((cur + kThreads - 1) / kThreads), kThreads, 0, st>>>(
-                d_qsqr, d_best, (int)cur);
-            TRY(cudaMemcpyAsync(h_lab, d_bidx, cur * sizeof(int), cudaMemcpyDeviceToHost, st));
-            TRY(cudaMemcpyAsync(h_val, d_best, cur * sizeof(float), cudaMemcpyDeviceToHost, st));
-            TRY(cudaStreamSynchronize(st));
-            for (uint64_t i = 0; i < cur; ++i) {
-                labels[off + i] = h_lab[i];
-                err_acc += h_val[i];
+            const float alpha = -2.0F;
+            const float beta = 0.0F;
+            if (cublasSgemm(handle[buf],
+                            CUBLAS_OP_T,
+                            CUBLAS_OP_N,
+                            (int)kc,
+                            (int)cur,
+                            dim,
+                            &alpha,
+                            cptr,
+                            dim,
+                            d_q[buf],
+                            dim,
+                            &beta,
+                            d_dist[buf],
+                            (int)kc) != CUBLAS_STATUS_SUCCESS) {
+                ok = false;
+                goto done;
             }
-            buf ^= 1;
+            fused_add_csqr_argmin<<<(int)cur,
+                                    kThreads,
+                                    kThreads * (sizeof(float) + sizeof(int)),
+                                    st>>>(
+                d_dist[buf], (int)kc, sptr, (int)kc, (int)koff, d_bidx[buf], d_best[buf]);
         }
-        TRY(cudaDeviceSynchronize());
-        if (error != nullptr) {
-            *error = err_acc / (double)query_count;
-        }
+        add_qsqr<<<(int)((cur + kThreads - 1) / kThreads), kThreads, 0, st>>>(
+            d_qsqr[buf], d_best[buf], (int)cur);
+        TRY(cudaMemcpyAsync(
+            h_lab[buf], d_bidx[buf], cur * sizeof(int), cudaMemcpyDeviceToHost, st));
+        TRY(cudaMemcpyAsync(
+            h_val[buf], d_best[buf], cur * sizeof(float), cudaMemcpyDeviceToHost, st));
+        pend_off[buf] = off;
+        pend_cnt[buf] = cur;
+        // No synchronize here: the next chunk is issued on the other stream and
+        // its host-to-device copy overlaps this chunk's compute.
+    }
+
+    for (int buf = 0; buf < 2; ++buf) {
+        TRY(cudaStreamSynchronize(stream[buf]));
+        drain(buf);
+    }
+    if (error != nullptr) {
+        *error = err_acc / (double)query_count;
     }
 
 done:
