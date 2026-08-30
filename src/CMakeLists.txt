@@ -14,6 +14,7 @@
 # limitations under the License.
 
 
+add_subdirectory (gpu)
 add_subdirectory (simd)
 add_subdirectory (io)
 add_subdirectory (layout)
@@ -63,7 +64,7 @@ foreach (_lib vsag vsag_static)
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 endforeach ()
 
-set (VSAG_DEP_LIBS antlr4-autogen antlr4-runtime simd io quantizer storage utils factory analyzer
+set (VSAG_DEP_LIBS vsag_gpu antlr4-autogen antlr4-runtime simd io quantizer storage utils factory analyzer
       datacell rabitq_split_datacell_factory ${IMPL_LIBS} ${ALGORITHM_LIBS} attr pthread m dl
       ${BLAS_LIBRARIES})
 

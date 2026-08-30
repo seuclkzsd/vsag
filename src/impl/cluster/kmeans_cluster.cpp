@@ -20,6 +20,7 @@
 #include <random>
 
 #include "algorithm/inner_index_interface.h"
+#include "gpu/cuda_kmeans_assign.h"
 #include "impl/allocator/safe_allocator.h"
 #include "impl/blas/blas_function.h"
 #include "simd/amx_bf16_matmul.h"
@@ -97,11 +98,29 @@ KMeansCluster::Run(uint32_t k,
         logger::trace("KMeansCluster::Run use hgraph");
     }
 
+    const bool try_gpu = gpu::CudaAvailable();
+    if (try_gpu) {
+        logger::trace("KMeansCluster::Run using CUDA backend");
+    }
     for (int it = 0; it < iter; ++it) {
-        if (k < THRESHOLD_FOR_HGRAPH) {
-            total_err = this->find_nearest_one_with_blas(datas, count, k, y_sqr, distances, labels);
-        } else {
-            total_err = this->find_nearest_one_with_hgraph(datas, count, k, labels);
+        bool assigned = false;
+        if (try_gpu) {
+            assigned = gpu::CudaAssignNearest(datas,
+                                              count,
+                                              k_centroids_,
+                                              k,
+                                              dim_,
+                                              labels.data(),
+                                              &total_err,
+                                              GPU_MEMORY_BUDGET);
+        }
+        if (not assigned) {
+            if (k < THRESHOLD_FOR_HGRAPH) {
+                total_err =
+                    this->find_nearest_one_with_blas(datas, count, k, y_sqr, distances, labels);
+            } else {
+                total_err = this->find_nearest_one_with_hgraph(datas, count, k, labels);
+            }
         }
         constexpr uint64_t bs = 1024;
 

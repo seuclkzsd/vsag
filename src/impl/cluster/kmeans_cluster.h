@@ -86,6 +86,9 @@ private:
     static constexpr uint64_t THRESHOLD_FOR_HGRAPH = 10000ULL;
 
     static constexpr uint64_t QUERY_BS = 65536ULL;
+
+    // Device working-set cap for the optional CUDA assignment backend.
+    static constexpr uint64_t GPU_MEMORY_BUDGET = 2ULL << 30;
 };
 
 }  // namespace vsag
