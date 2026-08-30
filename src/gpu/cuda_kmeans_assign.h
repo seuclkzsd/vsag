@@ -43,4 +43,30 @@ CudaAssignNearest(const float* query,
                   double* error,
                   uint64_t budget_bytes);
 
+/// GPU k-means++ seeding.
+///
+/// Chooses `k` initial centroids from `datas` (count x dim, row-major) with the
+/// standard D^2 rule and writes them to `centroids_out` (k x dim, row-major).
+/// `uniforms` supplies 2*k host-drawn values in [0, 1): the pair at 2*c is the
+/// weighted pick for centroid c and its fallback for a degenerate (all-zero)
+/// weight vector.
+///
+/// The whole dataset has to stay resident on the device, because every one of
+/// the k steps sweeps all of it; streaming it back per step would cost more
+/// than the CPU path. Returns false when it does not fit in `budget_bytes`, or
+/// when the backend is unavailable, in which case the caller must seed on the
+/// CPU.
+///
+/// The selection is statistically equivalent to the CPU routine but not
+/// identical: the prefix sums are accumulated in a different order, so a given
+/// draw can land on a neighbouring point.
+bool
+CudaKMeansPlusPlusInit(const float* datas,
+                       uint64_t count,
+                       int32_t dim,
+                       uint32_t k,
+                       const float* uniforms,
+                       float* centroids_out,
+                       uint64_t budget_bytes);
+
 }  // namespace vsag::gpu

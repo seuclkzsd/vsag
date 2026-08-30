@@ -37,4 +37,15 @@ CudaAssignNearest(const float* /*query*/,
     return false;
 }
 
+bool
+CudaKMeansPlusPlusInit(const float* /*datas*/,
+                       uint64_t /*count*/,
+                       int32_t /*dim*/,
+                       uint32_t /*k*/,
+                       const float* /*uniforms*/,
+                       float* /*centroids_out*/,
+                       uint64_t /*budget_bytes*/) {
+    return false;
+}
+
 }  // namespace vsag::gpu

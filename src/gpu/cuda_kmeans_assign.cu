@@ -107,6 +107,165 @@ add_qsqr(const float* __restrict__ q_sqr, float* __restrict__ best_val, int n) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// k-means++ seeding
+// ---------------------------------------------------------------------------
+
+// The dataset is split into kInitBlocks contiguous tiles so that a partial sum
+// of the D^2 weights is available per tile; the weighted draw then only has to
+// walk the tile sums plus the one tile it lands in.
+constexpr int32_t kInitBlocks = 1024;
+constexpr int32_t kInitWarps = 8;
+constexpr uint64_t kMaxInitShared = 44U << 10;  // stay clear of the 48 KiB limit
+
+__global__ void
+fill_float(float* __restrict__ p, uint64_t n, float v) {
+    uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        p[i] = v;
+    }
+}
+
+// Folds the distance to the newly chosen centroid into min_dist and reduces the
+// updated weights into one partial sum per tile. The centroid is read straight
+// out of the resident dataset via sel_prev, so no host round trip is needed
+// between two seeding steps.
+__global__ void
+kpp_update_min(const float* __restrict__ data,
+               uint64_t count,
+               int dim,
+               const uint64_t* __restrict__ sel_prev,
+               uint64_t rows_per_block,
+               float* __restrict__ min_dist,
+               float* __restrict__ block_sum) {
+    const uint64_t begin = (uint64_t)blockIdx.x * rows_per_block;
+    uint64_t end = begin + rows_per_block;
+    if (end > count) {
+        end = count;
+    }
+    const float* centroid = data + (*sel_prev) * (uint64_t)dim;
+    const int lane = (int)threadIdx.x;
+    const int warp = (int)threadIdx.y;
+
+    float acc = 0.F;
+    for (uint64_t r = begin + (uint64_t)warp; r < end; r += (uint64_t)blockDim.y) {
+        const float* p = data + r * (uint64_t)dim;
+        float d = 0.F;
+        for (int j = lane; j < dim; j += warpSize) {
+            const float t = p[j] - centroid[j];
+            d += t * t;
+        }
+        for (int off = warpSize / 2; off > 0; off >>= 1) {
+            d += __shfl_down_sync(0xffffffffU, d, off);
+        }
+        if (lane == 0) {
+            float m = min_dist[r];
+            if (d < m) {
+                m = d;
+                min_dist[r] = m;
+            }
+            acc += m;
+        }
+    }
+
+    __shared__ float s[kInitWarps];
+    if (lane == 0) {
+        s[warp] = acc;
+    }
+    __syncthreads();
+    if (warp == 0 && lane == 0) {
+        float v = 0.F;
+        for (int i = 0; i < (int)blockDim.y; ++i) {
+            v += s[i];
+        }
+        block_sum[blockIdx.x] = v;
+    }
+}
+
+// Single-block weighted draw. Both walks run over shared memory, so the
+// sequential prefix scan costs far less than the sweep in kpp_update_min.
+__global__ void
+kpp_select(const float* __restrict__ block_sum,
+           const float* __restrict__ min_dist,
+           uint64_t count,
+           uint64_t rows_per_block,
+           int32_t nblocks,
+           float u_pick,
+           float u_fallback,
+           uint64_t* __restrict__ sel_out) {
+    extern __shared__ float sh[];
+    float* s_blk = sh;
+    float* s_row = sh + nblocks;
+
+    __shared__ double s_total;
+    __shared__ double s_prefix;
+    __shared__ int32_t s_block;
+
+    for (int32_t b = (int32_t)threadIdx.x; b < nblocks; b += (int32_t)blockDim.x) {
+        s_blk[b] = block_sum[b];
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        double total = 0.0;
+        for (int32_t b = 0; b < nblocks; ++b) {
+            total += (double)s_blk[b];
+        }
+        s_total = total;
+        s_block = -1;
+        if (total > 0.0) {
+            const double threshold = (double)u_pick * total;
+            double cum = 0.0;
+            int32_t b = 0;
+            for (; b < nblocks - 1; ++b) {
+                const double next = cum + (double)s_blk[b];
+                if (next >= threshold) {
+                    break;
+                }
+                cum = next;
+            }
+            s_block = b;
+            s_prefix = cum;
+        }
+    }
+    __syncthreads();
+
+    if (s_block < 0) {
+        // Every remaining point coincides with a centroid; fall back to a
+        // uniform pick, matching the CPU routine.
+        if (threadIdx.x == 0) {
+            uint64_t idx = (uint64_t)((double)u_fallback * (double)count);
+            *sel_out = idx >= count ? count - 1 : idx;
+        }
+        return;
+    }
+
+    const uint64_t begin = (uint64_t)s_block * rows_per_block;
+    uint64_t end = begin + rows_per_block;
+    if (end > count) {
+        end = count;
+    }
+    const uint64_t len = end - begin;
+    for (uint64_t r = threadIdx.x; r < len; r += blockDim.x) {
+        s_row[r] = min_dist[begin + r];
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        const double threshold = (double)u_pick * s_total;
+        double cum = s_prefix;
+        uint64_t idx = end - 1;
+        for (uint64_t r = 0; r < len; ++r) {
+            cum += (double)s_row[r];
+            if (cum >= threshold) {
+                idx = begin + r;
+                break;
+            }
+        }
+        *sel_out = idx;
+    }
+}
+
 }  // namespace
 
 bool
@@ -319,6 +478,110 @@ CudaAssignNearest(const float* query,
     }
     if (error != nullptr) {
         *error = err_acc / (double)query_count;
+    }
+
+done:
+    cleanup();
+#undef TRY
+    return ok;
+}
+
+bool
+CudaKMeansPlusPlusInit(const float* datas,
+                       uint64_t count,
+                       int32_t dim,
+                       uint32_t k,
+                       const float* uniforms,
+                       float* centroids_out,
+                       uint64_t budget_bytes) {
+    if (datas == nullptr || uniforms == nullptr || centroids_out == nullptr || count == 0 ||
+        k == 0 || dim <= 0 || (uint64_t)k > count) {
+        return false;
+    }
+    if (!CudaAvailable()) {
+        return false;
+    }
+
+    const int32_t nblocks = (int32_t)std::min<uint64_t>(kInitBlocks, count);
+    const uint64_t rows_per_block = (count + (uint64_t)nblocks - 1) / (uint64_t)nblocks;
+
+    // kpp_select stages the tile sums and one tile of weights in shared memory.
+    const uint64_t shared_bytes = ((uint64_t)nblocks + rows_per_block) * sizeof(float);
+    if (shared_bytes > kMaxInitShared) {
+        return false;
+    }
+
+    // Every step sweeps the whole dataset, so it has to stay resident; there is
+    // nothing to gain from streaming it k times.
+    const uint64_t data_bytes = count * (uint64_t)dim * sizeof(float);
+    const uint64_t need = data_bytes + count * sizeof(float) +
+                          (uint64_t)nblocks * sizeof(float) + (uint64_t)k * sizeof(uint64_t);
+    if (need > budget_bytes) {
+        return false;
+    }
+
+    float* d_data = nullptr;
+    float* d_min = nullptr;
+    float* d_blk = nullptr;
+    uint64_t* d_sel = nullptr;
+    std::vector<uint64_t> h_sel(k, 0);
+    bool ok = true;
+
+    auto cleanup = [&]() {
+        if (d_data != nullptr) cudaFree(d_data);
+        if (d_min != nullptr) cudaFree(d_min);
+        if (d_blk != nullptr) cudaFree(d_blk);
+        if (d_sel != nullptr) cudaFree(d_sel);
+    };
+
+#define TRY(expr)                \
+    if ((expr) != cudaSuccess) { \
+        ok = false;              \
+        goto done;               \
+    }
+
+    TRY(cudaMalloc(&d_data, data_bytes));
+    TRY(cudaMalloc(&d_min, count * sizeof(float)));
+    TRY(cudaMalloc(&d_blk, (uint64_t)nblocks * sizeof(float)));
+    TRY(cudaMalloc(&d_sel, (uint64_t)k * sizeof(uint64_t)));
+    TRY(cudaMemcpy(d_data, datas, data_bytes, cudaMemcpyHostToDevice));
+
+    {
+        const uint64_t fill_blocks = (count + kThreads - 1) / kThreads;
+        fill_float<<<(int)fill_blocks, kThreads>>>(d_min, count, kFloatMax);
+
+        uint64_t first = (uint64_t)((double)uniforms[0] * (double)count);
+        if (first >= count) {
+            first = count - 1;
+        }
+        h_sel[0] = first;
+        TRY(cudaMemcpy(d_sel, h_sel.data(), sizeof(uint64_t), cudaMemcpyHostToDevice));
+
+        const dim3 threads(32, kInitWarps);
+        for (uint32_t c = 1; c < k; ++c) {
+            kpp_update_min<<<nblocks, threads>>>(
+                d_data, count, dim, d_sel + (c - 1), rows_per_block, d_min, d_blk);
+            kpp_select<<<1, kThreads, shared_bytes>>>(d_blk,
+                                                      d_min,
+                                                      count,
+                                                      rows_per_block,
+                                                      nblocks,
+                                                      uniforms[2 * c],
+                                                      uniforms[2 * c + 1],
+                                                      d_sel + c);
+        }
+        TRY(cudaGetLastError());
+        TRY(cudaMemcpy(
+            h_sel.data(), d_sel, (uint64_t)k * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    }
+
+    // The chosen rows are copied from the caller's own buffer; the device copy
+    // exists only to keep the sweeps local.
+    for (uint32_t c = 0; c < k; ++c) {
+        const uint64_t idx = h_sel[c] < count ? h_sel[c] : count - 1;
+        std::copy(datas + idx * (uint64_t)dim,
+                  datas + (idx + 1) * (uint64_t)dim,
+                  centroids_out + (uint64_t)c * (uint64_t)dim);
     }
 
 done:

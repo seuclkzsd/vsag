@@ -18,6 +18,7 @@
 #include <omp.h>
 
 #include <random>
+#include <vector>
 
 #include "algorithm/inner_index_interface.h"
 #include "gpu/cuda_kmeans_assign.h"
@@ -77,7 +78,21 @@ KMeansCluster::Run(uint32_t k,
     std::mt19937 gen(rd());
 
     if (init_method == KMeansInitMethod::KMEANS_PLUS_PLUS) {
-        select_initial_centroids_kmeans_plus_plus(datas, count, k, gen);
+        // The seeding sweeps the whole dataset once per centroid, so on the CPU
+        // it dominates the run for large k. Offload it when a device is around.
+        bool seeded = false;
+        if (gpu::CudaAvailable()) {
+            std::vector<float> uniforms(2ULL * static_cast<uint64_t>(k));
+            std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+            for (auto& u : uniforms) {
+                u = unit(gen);
+            }
+            seeded = gpu::CudaKMeansPlusPlusInit(
+                datas, count, dim_, k, uniforms.data(), k_centroids_, GPU_MEMORY_BUDGET);
+        }
+        if (not seeded) {
+            select_initial_centroids_kmeans_plus_plus(datas, count, k, gen);
+        }
     } else {
         select_initial_centroids_random(datas, count, k, gen);
     }
