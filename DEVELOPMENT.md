@@ -190,6 +190,19 @@ source of truth for the exact upstream URL and expected checksum.
 - **`ENABLE_MOCKIMPL`** (default: `OFF`)
   - Build the `mockimpl` targets used by interface and compatibility-style testing
 
+- **`ENABLE_CUDA`** (default: `OFF`, x86_64 with an NVIDIA toolkit only)
+  - Build the optional CUDA backend that can train IVF centroids on a device.
+    Requires `CUDAToolkit`. `VSAG_CUDA_ARCHITECTURES` (default
+    `70;75;80;86;89;90`) selects which architectures to generate code for.
+  - With the option off, a stub with the same symbols is compiled and every
+    caller keeps its CPU path, so the build is byte-identical in behaviour.
+  - Turning the option on is not enough on its own: an index also has to ask
+    for the backend with `enable_gpu_build`, which defaults to `false`. See
+    [IVF > GPU-accelerated training](docs/docs/en/src/indexes/ivf.md#gpu-accelerated-training).
+  - CI runners have no GPU, so the kernels are not exercised there. The sizing
+    decisions they depend on live in `src/gpu/gpu_plan.h`, free of CUDA, and are
+    covered by `src/gpu/gpu_plan_test.cpp`.
+
 For a complete list of build options, see the `option()` directives in `cmake/VSAGOptions.cmake`.
 
 ## Project Structure

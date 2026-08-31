@@ -70,6 +70,10 @@ auto result = index->KnnSearch(
 | `first_order_buckets_count` | int | `10` | 第一级桶数（`gno_imi` 策略下生效） |
 | `second_order_buckets_count` | int | `10` | 第二级桶数（`gno_imi` 策略下生效） |
 | `ivf_train_type` | string | `"kmeans"` | 中心训练方式：`kmeans` 或 `random` |
+| `enable_gpu_build` | bool | `false` | 训练质心时是否允许使用 CUDA 后端，见 [GPU 加速训练](#gpu-加速训练) |
+| `gpu_device_id` | int | `0` | CUDA 设备序号；机器上没有该序号时构建留在 CPU 上 |
+| `gpu_memory_budget` | int | `0` | 设备侧工作集上限（字节）；`0` 表示按设备空闲显存推导 |
+| `gpu_min_work_threshold` | int | `0` | 低于该 `count * buckets_count * dim` 规模不下发；`0` 表示使用标定过的默认值 |
 | `route_max_degree` | int | `64` | 路由 HGraph 的最大度数（`ivf` 策略下生效） |
 | `route_ef_construction` | int | `300` | 路由 HGraph 的构建搜索宽度（`ivf` 策略下生效） |
 | `base_quantization_type` | string | `"fp32"` | `fp32`、`fp16`、`bf16`、`sq8`、`sq4`、`sq8_uniform`、`sq4_uniform`、`pq`、`pqfs`、`rabitq` —— 各量化器细节见[量化章节](../quantization/README.md) |
@@ -113,6 +117,56 @@ auto loaded = vsag::Index::Load(stream, load_parameters).value();
 再在查询服务加载索引时绑定外部 reader。
 
 `buckets_count` 的经验值一般为 `sqrt(N)` ~ `4 * sqrt(N)`，其中 `N` 是语料规模。
+
+## GPU 加速训练
+
+`buckets_count` 增大后，聚类会成为 IVF 构建的主要开销，因为训练样本量随之增长：
+`train_sample_count` 默认为 `max(65536, 64 * buckets_count)`。在
+`ivf_train_type: "kmeans"` 下，仅播种一步就是 `O(buckets_count * train_sample_count * dim)`
+且为单线程。
+
+当 VSAG 以 `ENABLE_CUDA=ON` 构建时，这部分计算可以放到 CUDA 设备上。用
+`enable_gpu_build` 开启：
+
+```json
+{
+    "buckets_count": 4096,
+    "base_quantization_type": "fp32",
+    "partition_strategy_type": "ivf",
+    "ivf_train_type": "kmeans",
+    "enable_gpu_build": true,
+    "gpu_device_id": 0
+}
+```
+
+训练中有三部分会下发到设备：k-means++ 播种、最近质心赋值、质心累加。
+只有 `ivf_train_type: "kmeans"` 会受益，`random` 不做聚类，不受影响。
+
+**索引格式不变。** 在设备上训练出的索引与在 CPU 上训练的序列化格式相同，
+可以在没有 GPU 的机器上加载并检索。质心数值本身会有差异——两次 CPU 运行之间同样如此，
+因为播种从随机抽样开始。除两个质心到某点的距离在浮点舍入意义上相等的情形外，
+赋值结果与 CPU 路径一致，因此召回率的差异不超过运行间噪声。
+
+**以下情形会静默回退 CPU，且结果一致**：VSAG 未启用 CUDA 构建、没有可用设备、
+`gpu_device_id` 指定了机器上不存在的序号、问题规模低于 `gpu_min_work_threshold`、
+设备装不下某一步所需的数据、或任一 CUDA 调用失败。构建不会因为这个后端而失败。
+
+**显存。** 数据点分块流式传输，因此语料不必装进显存，只需容纳质心与一个分块。
+工作集由 `gpu_memory_budget` 限定，默认按设备报告的空闲显存推导，
+所以同一份构建在小显存卡上能跑、在大显存卡上也能用起来。播种是例外：
+它每选一个质心就要扫一遍全部训练样本，因此样本必须常驻；样本超出设备容量时
+播种回退 CPU，另外两部分仍在设备上。
+
+在 SIFT1M 上实测（100 万底库、128 维、48 线程，单卡 RTX 3090 对比双路 Xeon Gold 6336Y）：
+
+| `buckets_count` | CPU 构建 | GPU 构建 | 加速比 | Recall@10 变化 |
+|-----------------|----------|----------|--------|----------------|
+| 1000 | 59.9 s | 55.9 s | 1.07x | −0.02 个百分点 |
+| 4096 | 180.1 s | 61.6 s | 2.93x | +0.03 个百分点 |
+| 16384 | 781.5 s | 85.6 s | 9.13x | −0.06 个百分点 |
+
+加速比随 `buckets_count` 增大，因为聚类在构建中的占比随之上升。
+`buckets_count` 较小时，大部分时间花在把向量分配到桶里，那部分仍在 CPU 上。
 
 ## 检索参数
 
