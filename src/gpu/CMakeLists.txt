@@ -34,6 +34,10 @@ if (ENABLE_CUDA)
 else ()
     add_library (vsag_gpu STATIC cuda_kmeans_assign_stub.cpp)
     set_target_properties (vsag_gpu PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    # Only the stub is instrumented: it is ordinary C++ that the tests below
+    # exercise. The CUDA branch is left out because nvcc does not take
+    # --coverage, and a device-less CI cannot run those kernels anyway.
+    target_link_libraries (vsag_gpu PRIVATE coverage_config)
 endif ()
 
 target_include_directories (vsag_gpu PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -49,7 +53,8 @@ if (ENABLE_TESTS)
     # them, so put the project's C++ flags back on the host-only test target.
     separate_arguments (_gpu_test_flags NATIVE_COMMAND "${VSAG_EXTERNAL_CXX_FLAGS}")
     target_compile_options (gpu_test PRIVATE ${_gpu_test_flags})
-    target_link_libraries (gpu_test PRIVATE Catch2::Catch2 vsag_static unittest_deps)
+    target_link_libraries (gpu_test PRIVATE Catch2::Catch2 vsag_static unittest_deps
+                                          coverage_config)
     vsag_link_openmp_private (gpu_test)
     add_dependencies (gpu_test Catch2)
 endif ()
