@@ -27,4 +27,4 @@ set (IVF_SRCS
 )
 
 add_library (ivf OBJECT ${IVF_SRCS})
-target_link_libraries (ivf PRIVATE coverage_config vsag_src_common)
+target_link_libraries (ivf PRIVATE coverage_config vsag_src_common vsag_gpu)

@@ -21,6 +21,7 @@
 #include <cstdlib>
 
 #include "algorithm/hgraph/hgraph.h"
+#include "gpu/cuda_kmeans_assign.h"
 #include "algorithm/inner_index_interface.h"
 #include "impl/allocator/safe_allocator.h"
 #include "impl/cluster/kmeans_cluster.h"
@@ -99,6 +100,43 @@ IVFNearestPartition::ClassifyDatas(const void* datas,
                                    int64_t count,
                                    BucketIdType buckets_per_data,
                                    QueryContext* ctx) const {
+    // Build-time assignment asks for the single nearest centroid over the whole
+    // base, which is a dense matrix product rather than the per-vector graph
+    // search below. Offload it when the caller opted into the CUDA backend.
+    if (buckets_per_data == 1 and count > 0 and datas != nullptr and
+        ivf_partition_strategy_param_ != nullptr and
+        ivf_partition_strategy_param_->enable_gpu_build and gpu::CudaAvailable() and
+        gpu::CudaSelectDevice(ivf_partition_strategy_param_->gpu_device_id)) {
+        Vector<float> centroids(static_cast<uint64_t>(bucket_count_) * this->dim_,
+                                this->allocator_);
+        Vector<float> one(this->dim_, this->allocator_);
+        for (BucketIdType b = 0; b < bucket_count_; ++b) {
+            this->route_index_ptr_->GetCodeByInnerId(b, (uint8_t*)one.data());
+            std::copy(one.begin(), one.end(), centroids.begin() + (uint64_t)b * this->dim_);
+        }
+        Vector<int32_t> labels(count, -1, this->allocator_);
+        const uint64_t cap = ivf_partition_strategy_param_->gpu_memory_budget > 0
+                                 ? ivf_partition_strategy_param_->gpu_memory_budget
+                                 : gpu::kChunkedBudgetCap;
+        double err = 0.0;
+        if (gpu::CudaAssignNearest(reinterpret_cast<const float*>(datas),
+                                   static_cast<uint64_t>(count),
+                                   centroids.data(),
+                                   static_cast<uint64_t>(bucket_count_),
+                                   this->dim_,
+                                   labels.data(),
+                                   &err,
+                                   gpu::CudaSuggestedBudget(cap),
+                                   ivf_partition_strategy_param_->gpu_min_work_threshold)) {
+            Vector<BucketIdType> result(count, -1, this->allocator_);
+            for (int64_t i = 0; i < count; ++i) {
+                result[i] = static_cast<BucketIdType>(labels[i]);
+            }
+            return result;
+        }
+        // Anything the backend refused falls through to the graph search below.
+    }
+
     std::mutex dist_cmp_reduce_mutex;
     uint32_t dist_cmp = 0;
     Vector<BucketIdType> result(buckets_per_data * count, -1, this->allocator_);
