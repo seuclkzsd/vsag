@@ -45,8 +45,9 @@ constexpr uint64_t kMaxInitShared = 44U << 10;
 /// larger share of the card buys nothing and makes every allocation dearer.
 constexpr uint64_t kChunkedBudgetCap = 2ULL << 30;
 
-/// Smallest chunk worth issuing, so a tight budget still produces a launch with
-/// enough rows to fill the device.
+/// Smallest chunk worth issuing. A budget that cannot hold this many rows (or
+/// the whole input, when it is smaller) is refused: honouring the floor anyway
+/// would put the working set past the budget the caller asked for.
 constexpr uint64_t kMinChunkRows = 1024;
 
 /// How one nearest-centroid pass gets cut up.
@@ -82,8 +83,15 @@ PlanAssign(uint64_t query_count, uint64_t k, int32_t dim, uint64_t budget_bytes,
     // best value, its index and the row's squared norm.
     const uint64_t per_row =
         (uint64_t)dim * 2 * sizeof(float) + plan.k_chunk * 2 * sizeof(float) + 24;
-    plan.n_chunk =
-        std::max<uint64_t>(kMinChunkRows, std::min<uint64_t>(query_count, remain / per_row));
+    // A budget too tight for a chunk worth launching means the caller asked for
+    // a working set this pass cannot honour, so refuse rather than quietly
+    // allocating past it.
+    const uint64_t rows_that_fit = remain / per_row;
+    const uint64_t floor_rows = std::min<uint64_t>(query_count, kMinChunkRows);
+    if (rows_that_fit < floor_rows) {
+        return plan;
+    }
+    plan.n_chunk = std::min<uint64_t>(query_count, rows_that_fit);
     plan.offload = true;
     return plan;
 }
@@ -141,8 +149,12 @@ PlanAccumulate(uint64_t count, int32_t dim, uint32_t k, uint64_t budget_bytes) {
     }
     const uint64_t per_row = (uint64_t)dim * sizeof(float) + sizeof(int32_t);
     const uint64_t remain = budget_bytes - plan.accumulator_bytes;
-    plan.n_chunk =
-        std::max<uint64_t>(kMinChunkRows, std::min<uint64_t>(count, remain / per_row));
+    const uint64_t rows_that_fit = remain / per_row;
+    const uint64_t floor_rows = std::min<uint64_t>(count, kMinChunkRows);
+    if (rows_that_fit < floor_rows) {
+        return plan;
+    }
+    plan.n_chunk = std::min<uint64_t>(count, rows_that_fit);
     plan.offload = true;
     return plan;
 }

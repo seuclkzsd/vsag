@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
+
 #include "gpu_plan.h"
 
 #include "unittest.h"
@@ -74,16 +76,24 @@ TEST_CASE("PlanAssign chunks stay within the budget", "[ut][gpu_plan]") {
             }
             const uint64_t per_row = 128ULL * 2 * sizeof(float) +
                                      plan.k_chunk * 2 * sizeof(float) + 24;
-            const uint64_t working_set = plan.n_chunk * per_row;
-            // kMinChunkRows can push a very tight budget over, which is why the
-            // floor exists; anything above that must fit.
-            if (plan.n_chunk > kMinChunkRows) {
-                REQUIRE(working_set <= budget);
-            }
-            REQUIRE(plan.n_chunk >= kMinChunkRows);
+            // A plan that offloads must fit the budget it was given. No
+            // exemption: a floor that pushes the working set past the budget is
+            // a reason to refuse, not to overspend.
+            REQUIRE(plan.n_chunk * per_row <= budget);
+            REQUIRE(plan.n_chunk >= std::min<uint64_t>(2560000, kMinChunkRows));
             REQUIRE(plan.n_chunk <= 2560000);
         }
     }
+}
+
+TEST_CASE("PlanAssign refuses a budget it cannot honour", "[ut][gpu_plan]") {
+    // 4096 centroids of 128 dimensions need 2 MiB just for the centroids, and a
+    // 1024-row chunk another 33 MiB. Under a 1 MiB budget the pass must refuse:
+    // launching anyway would use 33x what the caller allowed.
+    REQUIRE_FALSE(PlanAssign(262144, 4096, 128, 1ULL << 20, 0).offload);
+    REQUIRE_FALSE(PlanAccumulate(262144, 128, 4096, 1ULL << 20).offload);
+    // Enough room for the floor-sized chunk, so it goes ahead.
+    REQUIRE(PlanAssign(262144, 4096, 128, 64ULL << 20, 0).offload);
 }
 
 TEST_CASE("PlanAssign never asks for more rows than it has", "[ut][gpu_plan]") {
@@ -144,9 +154,7 @@ TEST_CASE("PlanAccumulate chunks stay within the budget", "[ut][gpu_plan]") {
         const auto plan = PlanAccumulate(2560000, 128, 4096, budget);
         REQUIRE(plan.offload);
         const uint64_t per_row = 128ULL * sizeof(float) + sizeof(int32_t);
-        if (plan.n_chunk > kMinChunkRows) {
-            REQUIRE(plan.accumulator_bytes + plan.n_chunk * per_row <= budget);
-        }
+        REQUIRE(plan.accumulator_bytes + plan.n_chunk * per_row <= budget);
         REQUIRE(plan.n_chunk <= 2560000);
     }
 }
