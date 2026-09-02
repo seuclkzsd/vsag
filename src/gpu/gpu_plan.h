@@ -25,9 +25,21 @@
 namespace vsag::gpu {
 
 /// Below this many query * centroid * dimension products the launch and
-/// transfer overhead outweighs the device. Measured against the CPU path on a
-/// single RTX 3090; the crossover sat near k = 2000-4000 for 128 dimensions.
-constexpr uint64_t kMinWorkForGpu = 1ULL << 31;
+/// transfer overhead outweighs the device.
+///
+/// Calibrated against the path VSAG actually takes without the backend
+/// (single-threaded OpenBLAS SGEMM plus a threaded argmin), on one RTX 3090
+/// paired with a Xeon Gold 6336Y. Sweeping k over 64..8192 at dim 128, with
+/// n = max(65536, 64 * k) to match how IVF samples its training set, put the
+/// crossover at 3.3e9: the device lost by 28% at 2.1e9 and won by 25% at
+/// 4.3e9. Device time is flat across that band (0.40-0.45 s) while CPU time
+/// grows with the work, so what the floor guards against is fixed launch and
+/// transfer cost, not a shortage of parallelism.
+///
+/// 1ULL << 32 sits just above the crossover and keeps the power-of-two form.
+/// The crossover moves with the CPU-to-GPU ratio of the host, which is why
+/// callers can override it through `gpu_min_work_threshold`.
+constexpr uint64_t kMinWorkForGpu = 1ULL << 32;
 
 /// Centroid slice size when the full set cannot stay resident.
 constexpr uint64_t kStreamedCentroidChunk = 8192;

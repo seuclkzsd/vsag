@@ -48,6 +48,17 @@ TEST_CASE("PlanAssign keeps small problems on the CPU", "[ut][gpu_plan]") {
     REQUIRE(PlanAssign(1024, 16, 128, 2 * kGiB, 1).offload);
 }
 
+TEST_CASE("PlanAssign floor matches the measured crossover", "[ut][gpu_plan]") {
+    // Pins the two configurations the calibration sweep straddles, so a later
+    // edit to kMinWorkForGpu has to face the measurement. Training sets follow
+    // IVF's own n = max(65536, 64 * k).
+    //
+    // k=256 measured 0.72x (the device lost by 28%) and must stay on the CPU.
+    REQUIRE_FALSE(PlanAssign(65536, 256, 128, 2 * kGiB, 0).offload);
+    // k=512 measured 1.25x and must reach the device.
+    REQUIRE(PlanAssign(65536, 512, 128, 2 * kGiB, 0).offload);
+}
+
 TEST_CASE("PlanAssign keeps centroids resident when they fit", "[ut][gpu_plan]") {
     // 4096 centroids of 128 dimensions is 2 MiB, trivially resident in 2 GiB.
     const auto small = PlanAssign(262144, 4096, 128, 2 * kGiB, 0);
