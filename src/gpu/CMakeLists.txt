@@ -53,8 +53,12 @@ if (ENABLE_TESTS)
     # them, so put the project's C++ flags back on the host-only test target.
     separate_arguments (_gpu_test_flags NATIVE_COMMAND "${VSAG_EXTERNAL_CXX_FLAGS}")
     target_compile_options (gpu_test PRIVATE ${_gpu_test_flags})
-    target_link_libraries (gpu_test PRIVATE Catch2::Catch2 vsag_static unittest_deps
-                                          coverage_config)
+    # vsag_gpu carries VSAG_ENABLE_CUDA as a PUBLIC definition, and the stub
+    # tests are guarded on it. Linking it here is what makes that guard work:
+    # without it the stub cases compile into a CUDA build and fail, because
+    # they assert the backend is absent while the real one is linked in.
+    target_link_libraries (gpu_test PRIVATE Catch2::Catch2 vsag_gpu vsag_static
+                                          unittest_deps coverage_config)
     vsag_link_openmp_private (gpu_test)
     add_dependencies (gpu_test Catch2)
 endif ()
